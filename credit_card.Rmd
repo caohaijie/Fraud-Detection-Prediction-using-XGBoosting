@@ -1,0 +1,207 @@
+---
+title: "Fraud Detection prediction using XGBoosting"
+author: "Haijie CAO"
+date: "10/05/2017"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Reading Data
+
+```{r}
+card<-read.csv("creditcard.csv")
+```
+
+```{r}
+#card$Class<-as.factor(card$Class)
+table(card$Class)
+taux<-nrow(card[card$Class==1,])/nrow(card)
+taux
+```
+
+```{r}
+## seperate the data into training set and testing set
+cardsub<-card[,-1]
+set.seed(5)
+ind<-sample(2,nrow(cardsub),replace = T,prob=c(0.7,0.3))
+train<-cardsub[ind==1,]
+test<-cardsub[ind==2,]
+
+######===========================================================================================
+feature.names=names(train)
+
+for (f in feature.names) {
+  if (class(train[[f]])=="factor") {
+    levels <- unique(c(train[[f]]))
+    train[[f]] <- factor(train[[f]],
+                   labels=make.names(levels))
+  }
+}
+
+for (f in feature.names) {
+  if (class(test[[f]])=="factor") {
+    levels <- unique(c(test[[f]]))
+    test[[f]] <- factor(test[[f]],
+                   labels=make.names(levels))
+  }
+}
+#####=============================================================================================
+```
+
+## Dada Exploratory
+
+```{r}
+par(mfrow=c(2,5))
+for(i in 1:10){
+        hist(train[,i], main=names(train)[i])
+}
+```
+
+```{r}
+par(mfrow=c(2,5))
+for(i in 11:20){
+        hist(train[,i], main=names(train)[i])
+}
+```
+
+```{r}
+par(mfrow=c(2,5))
+for(i in 21:29){
+        hist(train[,i], main=names(train)[i])
+}
+```
+
+We can see that the variables are very skewed. 
+
+## XGBoost
+
+```{r}
+library(ggplot2,quietly = T)
+library(plyr)
+library(dplyr,quietly = T)
+library(tidyr,quietly = T)
+library(readr,quietly = T)
+library(xgboost,quietly = T)
+library(caret,quietly = T)
+library(pROC,quietly = T)
+
+# xgboost fitting with arbitrary parameters
+xgb_params = list(
+        objective = "binary:logistic",          # binary classification
+        eta = 0.01,                             # learning rate
+        max.depth = 3,                          # max tree depth
+        eval_metric = "auc"                     # evaluation/loss metric
+)
+
+# fit the model with the arbitrary parameters specified above
+xgb = xgboost(data = as.matrix(train[,1:29]),
+                label = train$Class,
+                params = xgb_params,
+                nrounds = 100,                  # max number of trees to build
+                verbose = TRUE,                                         
+                print_every_n = 20,
+                early_stop_round = 10          # stop if no improvement within 10 trees
+)
+```
+
+```{r}
+# cross-validate xgboost to get the accurate measure of error
+xgb_cv = xgb.cv(params = xgb_params,
+                  data = as.matrix(train[,1:29]),
+                  label = train$Class,
+                  nrounds = 100, 
+                  nfold = 5,                    # number of folds in K-fold
+                  prediction = TRUE,            # return the prediction using the final model 
+                  showsd = TRUE,                # standard deviation of loss across folds
+                  stratified = TRUE,            # sample is unbalanced; use stratified sampling
+                  verbose = TRUE,
+                  print_every_n = 20, 
+                  early_stop_round = 10
+)
+```
+
+
+```{r}
+# set up the cross-validated hyper-parameter search
+xgb_grid = expand.grid(
+        nrounds = 100,
+        eta = c(0.1),
+        max_depth = c(2,6),
+        gamma = 1,
+        colsample_bytree=1,
+        min_child_weight=10,
+        subsample=1)
+
+
+# pack the training control parameters
+xgb_trcontrol = trainControl(
+        method = "cv",
+        number = 5,
+        verboseIter = TRUE,
+        returnData = FALSE,
+        returnResamp = "all",                           # save losses across all models
+        classProbs = TRUE,                              # set to TRUE for AUC to be computed
+        summaryFunction = twoClassSummary,
+        allowParallel = TRUE
+)
+
+# train the model for each parameter combination in the grid, 
+#  using CV to evaluate
+train$Class[train$Class==0]<-"No"
+train$Class[train$Class==1]<-"Yes"
+
+xgb_train = train(
+        x = as.matrix(train[,1:29]),
+        y = as.factor(train$Class),
+        trControl = xgb_trcontrol,
+        metric="ROC",
+        tuneGrid = xgb_grid,
+        method = "xgbTree"
+)
+
+xgb_train$bestTune
+plot(xgb_train)
+```
+
+```{r}
+res <- xgb_train$results
+res
+```
+
+```{r}
+### xgboostModel Predictions and Performance
+# Make predictions using the test data set
+xgb.pred <- predict(xgb_train,test)
+
+test$Class[test$Class==0]<-"No"
+test$Class[test$Class==1]<-"Yes"
+test$Class<-as.factor(test$Class)
+
+#Look at the confusion matrix  
+confusionMatrix(xgb.pred,test$Class)   
+```
+
+```{r}
+#Draw the ROC curve 
+xgb.probs <- predict(xgb_train,test,type="prob")
+
+#head(xgb.probs)
+xgb.ROC <- roc(predictor=xgb.probs$No,
+               response=test$Class,
+               levels=rev(levels(test$Class)))
+xgb.ROC$auc
+```
+
+```{r}
+plot(xgb.ROC,main="xgboost ROC")
+```
+
+```{r}
+# Plot the propability of poor segmentation
+histogram(~xgb.probs$No|test$Class,xlab="Probability of Poor Segmentation")
+```
